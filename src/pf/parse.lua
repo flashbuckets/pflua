@@ -3,6 +3,7 @@ module(...,package.seeall)
 local utils = require('pf.utils')
 
 local ipv4_to_int = utils.ipv4_to_int
+local uint32 = utils.uint32
 
 local function skip_whitespace(str, pos)
    while pos <= #str and str:match('^%s', pos) do
@@ -327,10 +328,24 @@ function parse_uint16_arg(lexer) return parse_int_arg(lexer, 0xffff) end
 function parse_net_arg(lexer)
 
    function check_non_network_bits_in_addr(addr, mask, mask_str)
-      local ipv4 =  ipv4_to_int(addr)
-      if (bit.band(ipv4, mask) ~= bit.tobit(ipv4)) then
-         lexer.error("Non-network bits set in %d.%d.%d.%d/%s",
-                       addr[2], addr[3], addr[4], addr[5], mask_str)
+      if addr[1] == 'ipv4' then
+         local ip = uint32(addr[2], addr[3], addr[4], addr[5])
+         if (bit.band(ip, mask) ~= bit.tobit(ip)) then
+            lexer.error("Non-network bits set in %s/%s",
+                          table.concat(addr, ".", 2), mask_str)
+         end
+      else
+         -- In IPv6 mask is always expressed as length
+         local len = mask
+         for i = 2, 8, 2 do
+            local ip = addr[i] * 2^16 + addr[i + 1]
+            mask = len / 32 >= 1 and 32 or len % 32
+            if (bit.band(ip, 2^32 - 2^(32 - mask)) ~= bit.tobit(ip)) then
+               lexer.error("Non-network bits set in %x:%x:%x:%x:%x:%x:%x:%x/%s",
+                  addr[2], addr[3], addr[4], addr[5], addr[6], addr[7], addr[8], addr[9], mask_str)
+            end
+            len = len - mask
+         end
       end
    end
 
@@ -342,13 +357,17 @@ function parse_net_arg(lexer)
             local mask = 2^32 - 2^(32 - len)
             check_non_network_bits_in_addr(arg, mask, tostring(len))
          end
+         if (arg[1] == 'ipv6') then
+            check_non_network_bits_in_addr(arg, len, tostring(len))
+         end
          return { arg[1]..'/len', arg, len }
       elseif lexer.check('mask') then
-         local mask = lexer.next()
-         if (arg[1] == 'ipv4') then
-            check_non_network_bits_in_addr(arg, ipv4_to_int(mask),
-               table.concat(mask, '.', 2))
+         if (arg[1] == 'ipv6') then
+            lexer.error("Not valid syntax for IPv6")
          end
+         local mask = lexer.next()
+         check_non_network_bits_in_addr(arg, ipv4_to_int(mask),
+            table.concat(mask, '.', 2))
          assert(mask[1] == arg[1], 'bad mask', mask)
          return { arg[1]..'/mask', arg, mask }
       else
@@ -901,5 +920,11 @@ function selftest ()
              { 'host', { 'ipv6', 1, 0, 0, 0, 0, 0, 0, 1 } })
    parse_test("host 1::",
              { 'host', { 'ipv6', 1, 0, 0, 0, 0, 0, 0, 0 } })
+   parse_test("src net eee:eee::0/96",
+             { 'src_net', { 'ipv6/len', { 'ipv6', 3822, 3822, 0, 0, 0, 0, 0, 0 }, 96 } })
+   parse_test("src net 192.168.1.0/24",
+             { 'src_net', { 'ipv4/len', { 'ipv4', 192, 168, 1, 0 }, 24 } })
+   parse_test("src net 192.168.1.0 mask 255.255.255.0",
+             { 'src_net', { 'ipv4/mask', { 'ipv4', 192, 168, 1, 0 }, { 'ipv4', 255, 255, 255, 0 } } })
    print("OK")
 end

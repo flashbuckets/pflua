@@ -8,7 +8,7 @@ local expand_arith, expand_relop, expand_bool
 
 local set, concat, pp = utils.set, utils.concat, utils.pp
 local uint16, uint32 = utils.uint16, utils.uint32
-local ipv4_to_int = utils.ipv4_to_int
+local ipv4_to_int, ipv6_to_32bit = utils.ipv4_to_int, utils.ipv6_to_32bit
 
 local ether_protos = set(
    'ip', 'ip6', 'arp', 'rarp', 'atalk', 'aarp', 'decnet', 'sca', 'lat',
@@ -313,6 +313,7 @@ local proto_info = {
    ip   = { id = PROTO_IPV4,  access = "[ip]",    src = 12, dst = 16 },
    arp  = { id = PROTO_ARP,   access = "[arp]",   src = 14, dst = 24 },
    rarp = { id = PROTO_RARP,  access = "[rarp]",  src = 14, dst = 24 },
+   ip6  = { id = PROTO_IPV6,  access = "[ip6]",   src =  8, dst = 24 },
 }
 
 local function has_proto_dir_host(proto, dir, addr, mask)
@@ -359,19 +360,76 @@ local function expand_rarp_host(expr)
    return { 'or', expand_rarp_src_host(expr), expand_rarp_dst_host(expr) }
 end
 
+-- IPv6
+
+local function ipv6_dir_host(proto, dir, addr, len)
+   local ops = { has_ether_protocol(PROTO_IPV6) }
+
+   local offset = proto_info.ip6[dir]
+   local ipv6 = ipv6_to_32bit(addr)
+   len = len or 128
+
+   for i = 2, #ipv6 do
+      local fragment = ipv6[i]
+      local mask = len / 32 >= 1 and 0 or len % 32
+
+      local val = { proto_info.ip6.access, offset, 4 }
+      if fragment == 0 and mask ~= 0 then
+        -- FIXME: This is aimed to be a BPF_JSET operation but I'm not sure
+        -- what logical operator is that.
+        table.insert(ops, { '!=', val, 2^32 - 2^(32 - mask) })
+      else
+         if mask ~= 0 then val = { '&', val, mask } end
+         table.insert(ops, { '=', val, fragment })
+      end
+
+      len = len / 32 >= 1 and len - 32 or len - mask
+      if len == 0 then break end
+      offset = offset + 4
+   end
+
+   local function concat(lop, values)
+      local result = { lop, values[#values-1], values[#values] }
+      for i = #values-2, 1, -1 do
+         result = { lop, values[i], result }
+      end
+      return result
+   end
+
+   return concat('and', ops)
+end
+
+local function expand_src_ipv6_host(expr)
+   return ipv6_dir_host('ip6', 'src', expr[2], expr[3])
+end
+local function expand_dst_ipv6_host(expr)
+   return ipv6_dir_host('ip6', 'dst', expr[2], expr[3])
+end
+local function expand_ipv6_host(expr)
+   return { 'or', expand_src_ipv6_host(expr), expand_dst_ipv6_host(expr) }
+end
+
+
 -- Host
 
+local function is_ipv6_addr(expr)
+   return expr[2] and expr[2][1] == 'ipv6'
+end
+
 local function expand_src_host(expr)
+   if is_ipv6_addr(expr) then return expand_src_ipv6_host(expr) end
    return { 'if', { 'ip' }, expand_ip_src_host(expr),
             { 'if', { 'arp' }, expand_arp_src_host(expr),
               expand_rarp_src_host(expr) } }
 end
 local function expand_dst_host(expr)
+   if is_ipv6_addr(expr) then return expand_dst_ipv6_host(expr) end
    return { 'if', { 'ip' }, expand_ip_dst_host(expr),
             { 'if', { 'arp' }, expand_arp_dst_host(expr),
               expand_rarp_dst_host(expr) } }
 end
 local function expand_host(expr)
+   if is_ipv6_addr(expr) then return expand_ipv6_host(expr) end
    return { 'if', { 'ip' }, expand_ip_host(expr),
             { 'if', { 'arp' }, expand_arp_host(expr),
               expand_rarp_host(expr) } }
@@ -402,12 +460,15 @@ end
 -- Net
 
 local function expand_src_net(expr)
+   if is_ipv6_addr(expr) then return expand_src_ipv6_host(expr) end
    return expand_src_host(expr[2])
 end
 local function expand_dst_net(expr)
+   if is_ipv6_addr(expr) then return expand_dst_ipv6_host(expr) end
    return expand_dst_host(expr[2])
 end
 local function expand_net(expr)
+   if is_ipv6_addr(expr) then return expand_ipv6_host(expr) end
    return expand_host(expr[2])
 end
 

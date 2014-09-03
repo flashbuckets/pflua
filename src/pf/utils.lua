@@ -109,6 +109,17 @@ function ipv4_to_int(addr)
    return uint32(addr[2], addr[3], addr[4], addr[5])
 end
 
+-- IPv6 address consists of 8 groups of 16 bits.
+-- Returns IPv6 as 4 groups of 32 bits.
+function ipv6_to_32bit(addr)
+   local result = { addr[1] }
+   for i = 2, 8, 2 do
+      local fragment1, fragment2 = addr[i], addr[i + 1]
+      table.insert(result, fragment1 * 2^16 + fragment2)
+   end
+   return result
+end
+
 function selftest ()
    print("selftest: pf.utils")
    local tab = { 1, 2, 3 }

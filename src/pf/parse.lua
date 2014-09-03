@@ -57,22 +57,51 @@ local function lex_ipv4_or_host(str, pos)
 end
 
 local function lex_ipv6(str, pos)
+   local function pad_with_zeroes_if_needed(addr)
+      local MAX_PARTS = 9
+      if #addr == MAX_PARTS then return addr end
+
+      local result = {}
+      for i=1, #addr do
+         local part = addr[i]
+         -- Expand 0x10000 value to zero
+         if (part == 0x10000) then
+            for j=1, MAX_PARTS-i do table.insert(result, 0) end
+         else
+            table.insert(result, addr[i])
+         end
+      end
+      return result
+   end
+   local simplified_address = false
    local addr = { 'ipv6' }
-   -- FIXME: Currently only supporting fully-specified IPV6 names.
-   local digits, dot = str:match("^(%x%x%x%x)()%:", pos)
+   local digits, dot = str:match("^(%x?%x?%x?%x?)()%:", pos)
    assert(digits, "failed to parse ipv6 address at "..pos)
    table.insert(addr, tonumber(digits, 16))
-   pos = dot
-   for i=1,15 do
-      local digits, dot = str:match("^%:(%x%x%x%x)()", pos)
+   local pos = dot
+   while (true) do
+      local digits, dot = str:match("^%:(%x?%x?%x?%x?)()", pos)
+      if not dot then break end
       assert(digits, "failed to parse ipv6 address at "..pos)
+      if digits == "" then
+         -- Special case at the end of the string
+         if pos == #str then
+            digits = 0
+         else
+            assert(not simplified_address, "more than one zero simplification at "..pos)
+            -- 10000 indicates a zero value introduced by a simplification of IPv6.
+            -- This value will be expanded to a row of several zeroes later.
+            digits = 10000
+         end
+         simplified_address = true
+      end
       table.insert(addr, tonumber(digits, 16))
       pos = dot
    end
    local terminators = " \t\r\n)/"
    assert(pos > #str or terminators:find(str:sub(pos, pos), 1, true),
           "unexpected terminator for ipv6 address")
-   return addr, pos
+   return pad_with_zeroes_if_needed(addr), pos
 end
 
 local function lex_ehost(str, pos)
@@ -81,6 +110,7 @@ local function lex_ehost(str, pos)
       if (result < 16) then result = result * 2^4 end
       return result
    end
+   local start = pos
    local addr = { 'ehost' }
    local digits, dot = str:match("^(%x%x?)()%:", pos)
    assert(digits, "failed to parse ethernet host address at "..pos)
@@ -93,7 +123,10 @@ local function lex_ehost(str, pos)
       pos = dot
    end
    local terminators = " \t\r\n)/"
-   assert(pos > #str or terminators:find(str:sub(pos, pos), 1, true),
+   local last_char = str:sub(pos, pos)
+   -- MAC address is actually an IPv6 address
+   if last_char == ':' then return nil, start end
+   assert(pos > #str or terminators:find(last_char, 1, true),
           "unexpected terminator for ethernet host address")
    return addr, pos
 end
@@ -102,10 +135,12 @@ local function lex_addr(str, pos)
    local start_pos = pos
    if str:match("^%d%d?%d?%.", pos) then
       return lex_ipv4_or_host(str, pos)
-   elseif str:match("^%x%x%x%x%:", pos) then
-      return lex_ipv6(str, pos)
    elseif str:match("^%x%x?%:", pos) then
-      return lex_ehost(str, pos)
+      local result, pos = lex_ehost(str, pos)
+      if result then return result, pos end
+      return lex_ipv6(str, pos)
+   elseif str:match("^%x?%x?%x?%x?%:", pos) then
+      return lex_ipv6(str, pos)
    else
       return lex_host_or_keyword(str, pos)
    end
@@ -858,5 +893,13 @@ function selftest ()
              { 'ether_host', { 'ehost', 255, 255, 255, 51, 51, 51 } })
    parse_test("ether host f:f:f:3:3:3",
              { 'ether_host', { 'ehost', 240, 240, 240, 48, 48, 48 } })
+   parse_test("host 0:0:0:0:0:0:0:1",
+             { 'host', { 'ipv6', 0, 0, 0, 0, 0, 0, 0, 1 } })
+   parse_test("host ::1",
+             { 'host', { 'ipv6', 0, 0, 0, 0, 0, 0, 0, 1 } })
+   parse_test("host 1::1",
+             { 'host', { 'ipv6', 1, 0, 0, 0, 0, 0, 0, 1 } })
+   parse_test("host 1::",
+             { 'host', { 'ipv6', 1, 0, 0, 0, 0, 0, 0, 0 } })
    print("OK")
 end
